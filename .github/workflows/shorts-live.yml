@@ -14,13 +14,18 @@ jobs:
       - name: Install FFmpeg and Curl
         run: sudo apt-get update && sudo apt-get install -y ffmpeg curl
 
-      - name: Fetch Playlist from bolbill.in
+      - name: Download All Shorts Locally from bolbill.in
         run: |
+          mkdir -p videos
           curl -sL "https://bolbill.in/short_live/playlist.php" -o urls.txt
-          echo "Total videos found: $(wc -l < urls.txt)"
-          cat urls.txt
+          cd videos
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
+            curl -sLO "$url"
+          done < ../urls.txt
+          echo "Downloaded $(ls -1 | wc -l) videos locally."
 
-      - name: Start 24/7 Bulletproof Vertical Live
+      - name: Start Continuous Local Loop to YouTube
         env:
           STREAM_KEY: ${{ secrets.YOUTUBE_STREAM_KEY }}
         run: |
@@ -33,16 +38,16 @@ jobs:
           -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY" &
 
           while true; do
-            while IFS= read -r VIDEO_URL; do
-              [ -z "$VIDEO_URL" ] && continue
-              echo "Now Streaming: $VIDEO_URL"
+            for file in videos/*; do
+              [ -f "$file" ] || continue
+              echo "Now Streaming: $file"
               
               ffmpeg -hide_banner -loglevel error \
-              -i "$VIDEO_URL" -f lavfi -t 1 -i anullsrc=r=44100:cl=stereo \
+              -i "$file" -f lavfi -t 1 -i anullsrc=r=44100:cl=stereo \
               -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v]" \
               -map "[v]" -map "0:a?" -map "1:a" -shortest \
               -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p \
               -c:a aac -ar 44100 -ac 2 -b:a 128k \
               -f mpegts - > /tmp/live_pipe.ts || true
-            done < urls.txt
+            done
           done
