@@ -1,23 +1,41 @@
 name: Bolbill 24/7 Vertical Shorts Live
 
 on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - '**.mp4'
+      - '**.MP4'
+      - '**.mov'
+      - '**.MOV'
   workflow_dispatch:
   schedule:
     - cron: '0 */6 * * *'
 
+# नया वीडियो अपलोड होते ही पुरानी स्ट्रीम अपने आप बंद होकर नए वीडियो के साथ शुरू होगी
+concurrency:
+  group: bolbill-24-7-live-stream
+  cancel-in-progress: true
+
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   stream:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 358
 
     steps:
-      - name: Checkout Videos from GitHub Repo
+      - name: Checkout All Videos from GitHub Repo
         uses: actions/checkout@v4
 
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Merge All Repo Videos with Original Speed & Audio
+      - name: Auto-Detect & Merge All Videos into Master Loop
         run: |
           shopt -s nullglob
           mkdir -p norm
@@ -26,8 +44,6 @@ jobs:
           for file in $(ls -v *.mp4 *.MP4 *.mov *.MOV 2>/dev/null); do
             [ -s "$file" ] || continue
             out=$(printf "norm/%04d.mp4" "$i")
-
-            # जांचें कि वीडियो में असली ऑडियो है या नहीं
             HAS_AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "$file")
 
             if [ -n "$HAS_AUDIO" ]; then
@@ -59,15 +75,33 @@ jobs:
           fi
 
           ffmpeg -hide_banner -loglevel error -f concat -safe 0 -i merge.txt -c copy master.mp4
-          echo "Master file ready! Total duration:"
+
+          > loop_list.txt
+          for n in $(seq 1 1000); do
+            echo "file '$PWD/master.mp4'" >> loop_list.txt
+          done
+
+          echo "Total videos merged: $((i-1))"
+          echo "Single cycle duration (seconds):"
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 master.mp4
 
-      - name: Stream Master File at Real-Time 1x Speed
+      - name: Stream Seamlessly 24/7 to YouTube
         env:
           STREAM_KEY: ${{ secrets.YOUTUBE_STREAM_KEY }}
         run: |
-          while true; do
-            ffmpeg -re -stream_loop -1 -i master.mp4 \
-            -c copy -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY"
+          END_TIME=$(( $(date +%s) + 21000 ))
+          while [ $(date +%s) -lt $END_TIME ]; do
+            timeout 21000 ffmpeg -hide_banner -loglevel warning \
+            -re -f concat -safe 0 -i loop_list.txt \
+            -c:v libx264 -preset ultrafast -b:v 3500k -maxrate 3500k -bufsize 7000k -pix_fmt yuv420p -g 60 \
+            -c:a aac -b:a 128k -ar 44100 -ac 2 \
+            -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY" || true
             sleep 2
           done
+
+      - name: Auto-Trigger Next 24/7 Cycle
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run shorts-live.yml --repo ${{ github.repository }}
