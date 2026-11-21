@@ -11,24 +11,20 @@ jobs:
     timeout-minutes: 355
 
     steps:
-      - name: Install FFmpeg and Curl
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg curl
+      - name: Checkout Videos from GitHub Repo
+        uses: actions/checkout@v4
 
-      - name: Download and Merge All 10s Clips into One Master File
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Merge All Repo Videos into One Master File
         run: |
-          mkdir -p videos norm
-          curl -sL "https://bolbill.in/short_live/playlist.php" -o urls.txt
-          
-          cd videos
-          while IFS= read -r url; do
-            [ -z "$url" ] && continue
-            curl -sLO "$url"
-          done < ../urls.txt
-          cd ..
+          shopt -s nullglob
+          mkdir -p norm
 
           i=1
-          for file in $(ls -v videos/*); do
-            [ -f "$file" ] || continue
+          for file in $(ls -v *.mp4 *.MP4 *.mov *.MOV 2>/dev/null); do
+            [ -s "$file" ] || continue
             out=$(printf "norm/%04d.ts" "$i")
             ffmpeg -hide_banner -loglevel error \
             -i "$file" -f lavfi -t 1 -i anullsrc=r=44100:cl=stereo \
@@ -41,9 +37,18 @@ jobs:
             i=$((i+1))
           done
 
-          for f in norm/*.ts; do echo "file '$PWD/$f'" >> merge.txt; done
+          > merge.txt
+          for f in norm/*.ts; do
+            [ -s "$f" ] && echo "file '$PWD/$f'" >> merge.txt
+          done
+
+          if [ ! -s merge.txt ]; then
+            echo "ERROR: Repo mein koi valid video nahi mila!"
+            exit 1
+          fi
+
           ffmpeg -hide_banner -loglevel error -f concat -safe 0 -i merge.txt -c copy master.mp4
-          echo "Master file ready! Duration & Size:"
+          echo "Master file ready:"
           ls -lh master.mp4
 
       - name: Stream Master File Seamlessly to YouTube
