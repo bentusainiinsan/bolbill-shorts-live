@@ -17,7 +17,7 @@ jobs:
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Merge All Repo Videos into One Master File
+      - name: Merge All Repo Videos with Original Speed & Audio
         run: |
           shopt -s nullglob
           mkdir -p norm
@@ -25,20 +25,31 @@ jobs:
           i=1
           for file in $(ls -v *.mp4 *.MP4 *.mov *.MOV 2>/dev/null); do
             [ -s "$file" ] || continue
-            out=$(printf "norm/%04d.ts" "$i")
-            ffmpeg -hide_banner -loglevel error \
-            -i "$file" -f lavfi -t 1 -i anullsrc=r=44100:cl=stereo \
-            -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v]" \
-            -map "[v]" -map "0:a?" -map "1:a" -shortest \
-            -c:v libx264 -preset ultrafast -b:v 3500k -maxrate 3500k -bufsize 7000k \
-            -pix_fmt yuv420p -g 60 \
-            -c:a aac -ar 44100 -ac 2 -b:a 128k \
-            -f mpegts "$out" || true
+            out=$(printf "norm/%04d.mp4" "$i")
+
+            # जांचें कि वीडियो में असली ऑडियो है या नहीं
+            HAS_AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "$file")
+
+            if [ -n "$HAS_AUDIO" ]; then
+              ffmpeg -hide_banner -loglevel error -i "$file" \
+              -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,setpts=PTS-STARTPTS" \
+              -af "aresample=44100,asetpts=PTS-STARTPTS" \
+              -c:v libx264 -preset veryfast -b:v 3500k -maxrate 3500k -bufsize 7000k -pix_fmt yuv420p -g 60 \
+              -c:a aac -b:a 128k -ar 44100 -ac 2 \
+              "$out" || true
+            else
+              ffmpeg -hide_banner -loglevel error -i "$file" -f lavfi -i anullsrc=r=44100:cl=stereo \
+              -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,setpts=PTS-STARTPTS" \
+              -shortest \
+              -c:v libx264 -preset veryfast -b:v 3500k -maxrate 3500k -bufsize 7000k -pix_fmt yuv420p -g 60 \
+              -c:a aac -b:a 128k -ar 44100 -ac 2 \
+              "$out" || true
+            fi
             i=$((i+1))
           done
 
           > merge.txt
-          for f in norm/*.ts; do
+          for f in norm/*.mp4; do
             [ -s "$f" ] && echo "file '$PWD/$f'" >> merge.txt
           done
 
@@ -48,15 +59,15 @@ jobs:
           fi
 
           ffmpeg -hide_banner -loglevel error -f concat -safe 0 -i merge.txt -c copy master.mp4
-          echo "Master file ready:"
-          ls -lh master.mp4
+          echo "Master file ready! Total duration:"
+          ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 master.mp4
 
-      - name: Stream Master File Seamlessly to YouTube
+      - name: Stream Master File at Real-Time 1x Speed
         env:
           STREAM_KEY: ${{ secrets.YOUTUBE_STREAM_KEY }}
         run: |
           while true; do
-            ffmpeg -re -fflags +genpts -stream_loop -1 -i master.mp4 \
+            ffmpeg -re -stream_loop -1 -i master.mp4 \
             -c copy -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY"
             sleep 2
           done
