@@ -14,40 +14,44 @@ jobs:
       - name: Install FFmpeg and Curl
         run: sudo apt-get update && sudo apt-get install -y ffmpeg curl
 
-      - name: Download All Shorts Locally from bolbill.in
+      - name: Download and Merge All 10s Clips into One Master File
         run: |
-          mkdir -p videos
+          mkdir -p videos norm
           curl -sL "https://bolbill.in/short_live/playlist.php" -o urls.txt
+          
           cd videos
           while IFS= read -r url; do
             [ -z "$url" ] && continue
             curl -sLO "$url"
           done < ../urls.txt
-          echo "Downloaded $(ls -1 | wc -l) videos locally."
+          cd ..
 
-      - name: Start Continuous Local Loop to YouTube
+          i=1
+          for file in $(ls -v videos/*); do
+            [ -f "$file" ] || continue
+            out=$(printf "norm/%04d.ts" "$i")
+            ffmpeg -hide_banner -loglevel error \
+            -i "$file" -f lavfi -t 1 -i anullsrc=r=44100:cl=stereo \
+            -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v]" \
+            -map "[v]" -map "0:a?" -map "1:a" -shortest \
+            -c:v libx264 -preset ultrafast -b:v 3500k -maxrate 3500k -bufsize 7000k \
+            -pix_fmt yuv420p -g 60 \
+            -c:a aac -ar 44100 -ac 2 -b:a 128k \
+            -f mpegts "$out" || true
+            i=$((i+1))
+          done
+
+          for f in norm/*.ts; do echo "file '$PWD/$f'" >> merge.txt; done
+          ffmpeg -hide_banner -loglevel error -f concat -safe 0 -i merge.txt -c copy master.mp4
+          echo "Master file ready! Duration & Size:"
+          ls -lh master.mp4
+
+      - name: Stream Master File Seamlessly to YouTube
         env:
           STREAM_KEY: ${{ secrets.YOUTUBE_STREAM_KEY }}
         run: |
-          mkfifo /tmp/live_pipe.ts
-
-          ffmpeg -re -fflags +genpts+igndts -i /tmp/live_pipe.ts \
-          -c:v libx264 -preset veryfast -b:v 3500k -maxrate 3500k -bufsize 7000k \
-          -pix_fmt yuv420p -r 30 -g 60 \
-          -c:a aac -b:a 128k -ar 44100 -ac 2 \
-          -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY" &
-
           while true; do
-            for file in videos/*; do
-              [ -f "$file" ] || continue
-              echo "Now Streaming: $file"
-              
-              ffmpeg -hide_banner -loglevel error \
-              -i "$file" -f lavfi -t 1 -i anullsrc=r=44100:cl=stereo \
-              -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v]" \
-              -map "[v]" -map "0:a?" -map "1:a" -shortest \
-              -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p \
-              -c:a aac -ar 44100 -ac 2 -b:a 128k \
-              -f mpegts - > /tmp/live_pipe.ts || true
-            done
+            ffmpeg -re -fflags +genpts -stream_loop -1 -i master.mp4 \
+            -c copy -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY"
+            sleep 2
           done
